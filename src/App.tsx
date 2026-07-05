@@ -102,7 +102,7 @@ export default function App() {
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       (event, session) => {
-        if (event === 'SIGNED_IN' && session?.user?.email) {
+        if (session?.user?.email) {
           const email = session.user.email;
           
           if (!email.endsWith('@nitdgp.ac.in')) {
