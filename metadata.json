@@ -1,0 +1,6 @@
+{
+  "name": "Roomie Matchmaker",
+  "description": "Dummy Roomie Matchmaking Engine for cross-branch roommate selection.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
