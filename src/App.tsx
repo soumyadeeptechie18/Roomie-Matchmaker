@@ -1,523 +1,757 @@
-import { useState, useMemo, useEffect } from 'react';
-import { STUDENT_DATABASE, BaseStudent } from './data/students';
-import { Database, Users, LayoutDashboard, UserPlus, Search, LogIn, ArrowRight, X, Edit2, AlertCircle } from 'lucide-react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { 
+  Heart, Users, User, Search, MessageSquare, ArrowRight, 
+  Check, X, Shield, Filter, MapPin, BookOpen, Coffee,
+  LogOut, UserPlus, Sparkles, Send, Loader2, AlertCircle
+} from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
 import { supabase } from './lib/supabase';
 
+// --- TYPES ---
+type Branch = 'Computer Science' | 'Electronics' | 'Mechanical' | 'Civil' | 'Chemical' | 'Biotech';
+type Gender = 'M' | 'F' | 'Other';
+
+interface UserProfile {
+  id: string;
+  email: string;
+  name: string;
+  branch: Branch | '';
+  gender: Gender | '';
+  bio: string;
+  preferences: string[];
+  alreadyHasRoommate: boolean;
+  existingRoommateName?: string;
+  lookingFor: number;
+  avatarUrl: string;
+}
+
+interface RoommateRequest {
+  id: string;
+  fromId: string;
+  toId: string;
+  status: 'pending' | 'accepted' | 'rejected';
+}
+
+const PREFERENCE_TAGS = [
+  'Bengali', 'Hindi', 'English', 'Telugu', 'Tamil',
+  'Night Owl', 'Early Bird', 'Neat Freak', 'Relaxed about cleaning',
+  'Non-Smoker', 'Smoker', 'Vegetarian', 'Non-Vegetarian',
+  'Gamer', 'Studious', 'Gym Bro', 'Music Lover'
+];
+
 export default function App() {
-  const [view, setView] = useState<'login' | 'select' | 'dashboard'>('login');
-  const [currentUser, setCurrentUser] = useState<BaseStudent | null>(null);
+  const [view, setView] = useState<'auth' | 'onboarding' | 'feed' | 'requests' | 'profile'>('auth');
+  const [isLoading, setIsLoading] = useState(true);
+  
+  // Auth & Profile State
+  const [session, setSession] = useState<any>(null);
+  const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
+  const [authError, setAuthError] = useState('');
 
-  // Login State
-  const [loginError, setLoginError] = useState('');
+  // App State (Fallback to local state if Supabase tables don't exist)
+  const [allUsers, setAllUsers] = useState<UserProfile[]>([]);
+  const [requests, setRequests] = useState<RoommateRequest[]>([]);
+  const [dbError, setDbError] = useState(false);
 
-  // Select State
-  const [searchQuery, setSearchQuery] = useState('');
-  const [selectedRoommates, setSelectedRoommates] = useState<BaseStudent[]>([]);
-  const [isEditMode, setIsEditMode] = useState(false);
-  const [hasSubmitted, setHasSubmitted] = useState(false);
-
-  // Dashboard State
-  const [totalRegistered, setTotalRegistered] = useState<number>(0);
-  const [branchStats, setBranchStats] = useState<Record<string, number>>({});
-  const [registeredStudents, setRegisteredStudents] = useState<Record<string, string>>({});
-
-  // --- DATABASE SYNC ---
+  // --- AUTH LOGIC ---
   useEffect(() => {
-    if (!currentUser) return;
-    
-    // Check if user already submitted
-    const checkExistingSubmission = async () => {
-      try {
-        const { data, error } = await supabase
-          .from('roommate_selections')
-          .select('*')
-          .eq('reg_no', currentUser['Reg. No.'])
-          .maybeSingle();
-          
-        if (data) {
-          setHasSubmitted(true);
-          const r1 = STUDENT_DATABASE.find(s => s['Reg. No.'] === data.roommate1_reg_no);
-          const r2 = STUDENT_DATABASE.find(s => s['Reg. No.'] === data.roommate2_reg_no);
-          if (r1 && r2) {
-            setSelectedRoommates([r1, r2]);
-          }
-          setView('dashboard');
-        }
-      } catch (err) {
-        console.error("Error fetching submission:", err);
-      }
-    };
-    
-    checkExistingSubmission();
-  }, [currentUser]);
-
-  useEffect(() => {
-    // Fetch total registered count
-    const fetchTotal = async () => {
-      try {
-        const { data, error } = await supabase
-          .from('roommate_selections')
-          .select('reg_no, roommate1_reg_no, roommate2_reg_no');
-        
-        if (data && !error) {
-          setTotalRegistered(data.length);
-
-          const stats: Record<string, number> = {};
-          const registeredMap: Record<string, string> = {};
-          data.forEach(row => {
-            const regs = [row.reg_no, row.roommate1_reg_no, row.roommate2_reg_no];
-            regs.forEach(reg => {
-              registeredMap[reg] = row.reg_no;
-              const student = STUDENT_DATABASE.find(s => s['Reg. No.'] === reg);
-              if (student) {
-                stats[student.Program] = (stats[student.Program] || 0) + 1;
-              }
-            });
-          });
-          
-          setBranchStats(stats);
-          setRegisteredStudents(registeredMap);
-        }
-      } catch (err) {
-        console.error(err);
-      }
-    };
-
-    fetchTotal();
-
-    // Subscribe to realtime changes
-    const subscription = supabase
-      .channel('roommate_selections_changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'roommate_selections' }, () => {
-        fetchTotal();
-      })
-      .subscribe();
-
-    return () => {
-      subscription.unsubscribe();
-    };
-  }, []);
-
-  // --- LOGIN LOGIC ---
-  useEffect(() => {
-    const handleSession = (session: any) => {
-        if (session?.user?.email) {
-          const email = session.user.email;
-          
-          if (!email.endsWith('@nitdgp.ac.in')) {
-            setLoginError("Please use your official institute email (@nitdgp.ac.in).");
-            supabase.auth.signOut();
-            return;
-          }
-
-          const match = email.match(/\d{2}[a-zA-Z]\d{5}/i);
-          if (!match) {
-            setLoginError("Invalid institute email format. Reg. No. not found.");
-            supabase.auth.signOut();
-            return;
-          }
-
-          const regNo = match[0].toUpperCase();
-          const student = STUDENT_DATABASE.find(s => s['Reg. No.'].toUpperCase() === regNo);
-          
-          if (student) {
-            setCurrentUser(student);
-            setView('select');
-            setLoginError('');
-            
-            // clear hash from URL for cleaner look
-            if (window.location.hash) {
-              window.history.replaceState(null, '', window.location.pathname);
-            }
-          } else {
-            setLoginError(`Reg. No. ${regNo} not found in the official database.`);
-            supabase.auth.signOut();
-          }
-        }
-    };
-
-    // Check initial session
     supabase.auth.getSession().then(({ data: { session } }) => {
-       handleSession(session);
+      handleSession(session);
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      (event, session) => {
-        handleSession(session);
-        if (event === 'SIGNED_OUT') {
-            setCurrentUser(null);
-            setView('login');
-            setSelectedRoommates([]);
-            setHasSubmitted(false);
-            setIsEditMode(false);
-        }
-      }
-    );
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      handleSession(session);
+    });
 
     return () => subscription.unsubscribe();
   }, []);
 
-  const handleLogin = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    setLoginError('');
-    
-    const { error } = await supabase.auth.signInWithOAuth({
-      provider: 'google',
-      options: {
-        redirectTo: window.location.origin,
-        queryParams: {
-          prompt: 'select_account',
-          hd: 'nitdgp.ac.in'
+  const handleSession = async (currentSession: any) => {
+    setSession(currentSession);
+    if (currentSession?.user) {
+      const userEmail = currentSession.user.email || '';
+      
+      // Strict Institute Email Check
+      if (!userEmail.endsWith('@institute.edu')) {
+        setAuthError('Only @institute.edu emails are allowed to access this network.');
+        await supabase.auth.signOut();
+        setIsLoading(false);
+        return;
+      }
+      
+      setAuthError('');
+      await loadUserData(currentSession.user.id, userEmail);
+    } else {
+      setCurrentUser(null);
+      setView('auth');
+      setIsLoading(false);
+    }
+  };
+
+  const handleGoogleLogin = async () => {
+    setAuthError('');
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          queryParams: {
+            // Optional: prefill hosted domain to restrict google account picker
+            hd: 'institute.edu'
+          }
         }
+      });
+      if (error) throw error;
+    } catch (err: any) {
+      setAuthError(err.message);
+    }
+  };
+
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+    setCurrentUser(null);
+    setView('auth');
+  };
+
+  // --- DATABASE LOGIC (WITH LOCAL FALLBACK) ---
+  const loadUserData = async (userId: string, email: string) => {
+    try {
+      // Attempt to load from Supabase
+      const { data: profileData, error: profileError } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', userId)
+        .maybeSingle();
+
+      if (profileError && profileError.code === '42P01') {
+        // Table doesn't exist - use local state fallback
+        setDbError(true);
+        handleLocalFallbackMode(userId, email);
+        return;
+      }
+
+      if (profileData) {
+        setCurrentUser(profileData as UserProfile);
+        await loadFeedData(userId, profileData.branch, profileData.gender);
+        setView('feed');
+      } else {
+        // Needs onboarding
+        setCurrentUser({
+          id: userId,
+          email: email,
+          name: '',
+          branch: '',
+          gender: '',
+          bio: '',
+          preferences: [],
+          alreadyHasRoommate: false,
+          lookingFor: 2,
+          avatarUrl: `https://api.dicebear.com/7.x/avataaars/svg?seed=${userId}`
+        });
+        setView('onboarding');
+      }
+    } catch (err) {
+      console.error(err);
+      handleLocalFallbackMode(userId, email);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const loadFeedData = async (userId: string, branch: string, gender: string) => {
+    try {
+      const { data: profiles, error: pError } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('branch', branch)
+        .eq('gender', gender)
+        .neq('id', userId);
+        
+      if (!pError && profiles) setAllUsers(profiles as UserProfile[]);
+
+      const { data: reqs, error: rError } = await supabase
+        .from('roommate_requests')
+        .select('*')
+        .or(`fromId.eq.${userId},toId.eq.${userId}`);
+        
+      if (!rError && reqs) setRequests(reqs as RoommateRequest[]);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  // Local fallback logic when Supabase tables aren't created yet
+  const handleLocalFallbackMode = (userId: string, email: string) => {
+    setIsLoading(false);
+    const existing = allUsers.find(u => u.id === userId);
+    if (existing) {
+      setCurrentUser(existing);
+      setView('feed');
+    } else {
+      setCurrentUser({
+        id: userId,
+        email: email,
+        name: '',
+        branch: '',
+        gender: '',
+        bio: '',
+        preferences: [],
+        alreadyHasRoommate: false,
+        lookingFor: 2,
+        avatarUrl: `https://api.dicebear.com/7.x/avataaars/svg?seed=${userId}`
+      });
+      setView('onboarding');
+    }
+  };
+
+  // --- ONBOARDING STATE ---
+  const [onboardingData, setOnboardingData] = useState<Partial<UserProfile>>({});
+  
+  const handleOnboardingSubmit = async () => {
+    if (!currentUser) return;
+    const updatedUser = { ...currentUser, ...onboardingData } as UserProfile;
+    
+    if (!dbError) {
+      try {
+        const { error } = await supabase.from('profiles').upsert(updatedUser);
+        if (error) throw error;
+      } catch (err) {
+        console.error("DB Save failed, falling back to local state", err);
+        setDbError(true);
+      }
+    }
+    
+    // Update local state regardless
+    setAllUsers(prev => [...prev.filter(u => u.id !== updatedUser.id), updatedUser]);
+    setCurrentUser(updatedUser);
+    setView('feed');
+  };
+
+  const togglePreference = (pref: string) => {
+    setOnboardingData(prev => {
+      const current = prev.preferences || [];
+      if (current.includes(pref)) {
+        return { ...prev, preferences: current.filter(p => p !== pref) };
+      } else {
+        return { ...prev, preferences: [...current, pref] };
       }
     });
-
-    if (error) {
-      setLoginError(error.message);
-    }
   };
 
-  const handleLogout = async () => {
-    await supabase.auth.signOut();
-  };
+  // --- FEED LOGIC ---
+  const feedUsers = useMemo(() => {
+    if (!currentUser) return [];
+    return allUsers.filter(u => 
+      u.id !== currentUser.id && 
+      u.branch === currentUser.branch &&
+      u.gender === currentUser.gender &&
+      u.lookingFor > 0 // Only show people who are looking for someone
+    );
+  }, [currentUser, allUsers]);
 
-  // --- SELECT LOGIC ---
-  const filteredStudents = useMemo(() => {
-    if (!searchQuery) return [];
-    return STUDENT_DATABASE.filter(s => 
-      s.Gender === 'M' &&
-      s['Reg. No.'] !== currentUser?.['Reg. No.'] && 
-      !selectedRoommates.some(r => r['Reg. No.'] === s['Reg. No.']) &&
-      (s.Name.toLowerCase().includes(searchQuery.toLowerCase()) || s['Reg. No.'].toLowerCase().includes(searchQuery.toLowerCase()))
-    ).slice(0, 5);
-  }, [searchQuery, currentUser, selectedRoommates]);
-
-  const addRoommate = (student: BaseStudent) => {
-    if (selectedRoommates.length < 2) {
-      setSelectedRoommates([...selectedRoommates, student]);
-      setSearchQuery('');
-    }
-  };
-
-  const removeRoommate = (regNo: string) => {
-    setSelectedRoommates(selectedRoommates.filter(r => r['Reg. No.'] !== regNo));
-  };
-
-  const handleSubmitGroup = async () => {
-    if (selectedRoommates.length !== 2 || !currentUser) return;
+  const handleSendRequest = async (toId: string) => {
+    if (!currentUser) return;
+    const newReq: RoommateRequest = {
+      id: `req_${Date.now()}`,
+      fromId: currentUser.id,
+      toId,
+      status: 'pending'
+    };
     
-    try {
-      const { error } = await supabase.from('roommate_selections').upsert({
-        reg_no: currentUser['Reg. No.'],
-        roommate1_reg_no: selectedRoommates[0]['Reg. No.'],
-        roommate2_reg_no: selectedRoommates[1]['Reg. No.']
-      });
+    if (!dbError) {
+       await supabase.from('roommate_requests').insert(newReq);
+    }
+    
+    setRequests(prev => [...prev, newReq]);
+  };
 
-      if (error) throw error;
-
-      setHasSubmitted(true);
-      setIsEditMode(false);
-      setView('dashboard');
-    } catch (err: any) {
-      console.error(err);
-      alert("Error saving your roommates to the database. Have you created the table in Supabase yet?");
+  const handleAcceptRequest = async (reqId: string) => {
+    if (!currentUser) return;
+    
+    // Update request status
+    if (!dbError) {
+        await supabase.from('roommate_requests').update({ status: 'accepted' }).eq('id', reqId);
+    }
+    setRequests(prev => prev.map(r => r.id === reqId ? { ...r, status: 'accepted' } : r));
+    
+    // Update our own profile
+    const req = requests.find(r => r.id === reqId);
+    if (req) {
+       const otherUser = allUsers.find(u => u.id === req.fromId);
+       if (otherUser) {
+           const updatedMe = { 
+               ...currentUser, 
+               alreadyHasRoommate: true,
+               existingRoommateName: currentUser.alreadyHasRoommate 
+                  ? `${currentUser.existingRoommateName} & ${otherUser.name}` 
+                  : otherUser.name,
+               lookingFor: Math.max(0, currentUser.lookingFor - 1)
+           };
+           setCurrentUser(updatedMe);
+           setAllUsers(prev => prev.map(u => u.id === currentUser.id ? updatedMe : u));
+           
+           if (!dbError) {
+              await supabase.from('profiles').update(updatedMe).eq('id', currentUser.id);
+           }
+       }
     }
   };
 
-  return (
-    <div className="min-h-screen bg-slate-950 text-slate-200 font-sans selection:bg-blue-500/30 selection:text-blue-200">
-      <div className="max-w-6xl mx-auto p-4 sm:p-6 lg:p-8">
-        
-        {/* HEADER */}
-        <header className="flex flex-col sm:flex-row justify-between items-center mb-10 pb-6 border-b border-slate-800">
-          <div className="flex items-center gap-3 mb-4 sm:mb-0">
-            <div className="bg-gradient-to-br from-blue-500 to-emerald-400 p-2.5 rounded-xl shadow-lg shadow-blue-500/20">
-              <Users size={28} className="text-white" />
-            </div>
-            <div>
-              <h1 className="text-2xl font-bold text-white tracking-tight">Hostel Match</h1>
-              <p className="text-slate-400 text-sm font-medium">B.Tech Second Year (2025)</p>
+  // --- DERIVED STATE ---
+  const incomingRequests = requests.filter(r => r.toId === currentUser?.id && r.status === 'pending');
+  const outgoingRequests = requests.filter(r => r.fromId === currentUser?.id);
+
+  // --- RENDERERS ---
+  
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-4">
+        <Loader2 className="animate-spin text-rose-500 mb-4" size={48} />
+        <p className="text-slate-400 font-medium">Authenticating...</p>
+      </div>
+    );
+  }
+
+  if (view === 'auth') {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4 selection:bg-rose-500/30">
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-3xl p-8 shadow-2xl relative overflow-hidden"
+        >
+          <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-rose-500 to-orange-500"></div>
+          
+          <div className="flex justify-center mb-8">
+            <div className="bg-rose-500/10 p-4 rounded-full border border-rose-500/20">
+              <Heart className="text-rose-500" size={40} fill="currentColor" />
             </div>
           </div>
           
-          <div className="flex gap-3">
-            {currentUser && (
-              <>
-                <button 
-                  onClick={() => setView('select')}
-                  className={`px-4 py-2 rounded-lg font-medium transition-all ${view === 'select' ? 'bg-slate-800 text-white shadow-inner' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'}`}
-                >
-                  My Group
-                </button>
-                <button 
-                  onClick={() => setView('dashboard')}
-                  className={`px-4 py-2 rounded-lg font-medium transition-all ${view === 'dashboard' ? 'bg-slate-800 text-white shadow-inner' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'}`}
-                >
-                  Dashboard
-                </button>
-              </>
-            )}
+          <h1 className="text-3xl font-bold text-white text-center mb-2 tracking-tight">RoommateMatch</h1>
+          <p className="text-slate-400 text-center mb-8">Find your perfect dorm companion.</p>
+          
+          {authError && (
+            <div className="mb-6 flex items-start gap-3 text-rose-400 text-sm bg-rose-500/10 p-4 rounded-xl border border-rose-500/20">
+              <AlertCircle size={18} className="shrink-0 mt-0.5" />
+              <span>{authError}</span>
+            </div>
+          )}
+          
+          <button
+            onClick={handleGoogleLogin}
+            className="w-full flex items-center justify-center gap-3 bg-white hover:bg-slate-50 text-slate-900 font-semibold py-3.5 rounded-xl shadow-lg transition-all transform hover:scale-[1.02] active:scale-95"
+          >
+            <svg viewBox="0 0 24 24" className="w-5 h-5" xmlns="http://www.w3.org/2000/svg"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
+            Sign in with Institute Google
+          </button>
+          
+          <div className="mt-6 flex items-center justify-center gap-2 text-sm text-slate-500">
+            <Shield size={14} />
+            <span>Secure @institute.edu network</span>
           </div>
-        </header>
+        </motion.div>
+      </div>
+    );
+  }
 
-        {/* VIEWS */}
-        {view === 'login' && (
-          <div className="flex justify-center items-center mt-12">
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl w-full max-w-md relative overflow-hidden">
-              <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-blue-500 to-emerald-400"></div>
-              <div className="flex justify-center mb-6">
-                <div className="bg-blue-500/10 p-4 rounded-full border border-blue-500/20">
-                  <LogIn size={32} className="text-blue-400" />
-                </div>
+  if (view === 'onboarding') {
+    return (
+      <div className="min-h-screen bg-slate-950 p-4 sm:p-8 flex justify-center">
+        <motion.div 
+          initial={{ opacity: 0, scale: 0.95 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="w-full max-w-2xl bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-10 shadow-2xl"
+        >
+          <h2 className="text-2xl font-bold text-white mb-2">Build Your Profile</h2>
+          <p className="text-slate-400 mb-8">Let's set up your roommate preferences.</p>
+          
+          <div className="space-y-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div>
+                <label className="block text-sm font-medium text-slate-400 mb-2">Full Name</label>
+                <input
+                  type="text"
+                  value={onboardingData.name || ''}
+                  onChange={e => setOnboardingData({...onboardingData, name: e.target.value})}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-white focus:border-rose-500 outline-none"
+                  placeholder="Your Name"
+                />
               </div>
-              <h2 className="text-2xl font-bold text-center text-white mb-2">Institute Login</h2>
-              <p className="text-center text-slate-400 mb-6 text-sm">
-                Sign in with your official institute Google account to continue.
-              </p>
               
-              <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-4 mb-6 flex items-start gap-3 flex-col">
-                <div className="flex items-start gap-3">
-                  <AlertCircle className="text-amber-400 shrink-0 mt-0.5" size={20} />
-                  <p className="text-sm text-amber-200/90 leading-relaxed">
-                    <strong>Important:</strong> Only register yourself and your roommates if you are confirmed to change rooms unofficially later.
-                  </p>
-                </div>
-                <div className="flex items-start gap-3">
-                  <AlertCircle className="text-amber-400 shrink-0 mt-0.5" size={20} />
-                  <p className="text-sm text-amber-200/90 leading-relaxed">
-                    <strong>Notice:</strong> Register only if you haven't filled the official form of roommates yet.
-                  </p>
-                </div>
-              </div>
-
-              <div className="space-y-4">
-                {loginError && <p className="text-red-400 text-sm mt-2 text-center bg-red-400/10 p-3 rounded-lg border border-red-500/20">{loginError}</p>}
-                
-                <button 
-                  onClick={() => handleLogin()} 
-                  className="w-full bg-white hover:bg-slate-100 text-slate-900 py-3 rounded-lg font-semibold transition-colors shadow-lg flex justify-center items-center gap-3"
+              <div>
+                <label className="block text-sm font-medium text-slate-400 mb-2">Branch</label>
+                <select
+                  value={onboardingData.branch || ''}
+                  onChange={e => setOnboardingData({...onboardingData, branch: e.target.value as Branch})}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-white focus:border-rose-500 outline-none appearance-none"
                 >
-                  <svg className="w-5 h-5" viewBox="0 0 24 24">
-                    <path fill="currentColor" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
-                    <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
-                    <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" />
-                    <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
-                  </svg>
-                  Sign in with Google
+                  <option value="" disabled>Select Branch</option>
+                  <option value="Computer Science">Computer Science</option>
+                  <option value="Electronics">Electronics</option>
+                  <option value="Mechanical">Mechanical</option>
+                  <option value="Civil">Civil</option>
+                  <option value="Chemical">Chemical</option>
+                  <option value="Biotech">Biotech</option>
+                </select>
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-slate-400 mb-2">Gender</label>
+                <select
+                  value={onboardingData.gender || ''}
+                  onChange={e => setOnboardingData({...onboardingData, gender: e.target.value as Gender})}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-white focus:border-rose-500 outline-none appearance-none"
+                >
+                  <option value="" disabled>Select Gender</option>
+                  <option value="M">Male</option>
+                  <option value="F">Female</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="border-t border-slate-800 pt-6">
+              <label className="block text-sm font-medium text-slate-400 mb-4">Current Status</label>
+              <div className="flex gap-4">
+                <button
+                  onClick={() => setOnboardingData({...onboardingData, alreadyHasRoommate: false, lookingFor: 2})}
+                  className={`flex-1 py-3 px-4 rounded-xl border transition-all ${onboardingData.alreadyHasRoommate === false ? 'bg-rose-500/10 border-rose-500 text-rose-400' : 'bg-slate-950 border-slate-800 text-slate-400'}`}
+                >
+                  I'm alone, looking for roommates
+                </button>
+                <button
+                  onClick={() => setOnboardingData({...onboardingData, alreadyHasRoommate: true, lookingFor: 1})}
+                  className={`flex-1 py-3 px-4 rounded-xl border transition-all ${onboardingData.alreadyHasRoommate === true ? 'bg-rose-500/10 border-rose-500 text-rose-400' : 'bg-slate-950 border-slate-800 text-slate-400'}`}
+                >
+                  We are 2, looking for a 3rd
                 </button>
               </div>
             </div>
+
+            {onboardingData.alreadyHasRoommate && (
+              <motion.div initial={{opacity:0, height:0}} animate={{opacity:1, height:'auto'}}>
+                <label className="block text-sm font-medium text-slate-400 mb-2 mt-4">Existing Roommate's Name</label>
+                <input
+                  type="text"
+                  value={onboardingData.existingRoommateName || ''}
+                  onChange={e => setOnboardingData({...onboardingData, existingRoommateName: e.target.value})}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-white focus:border-rose-500 outline-none"
+                  placeholder="E.g. Rohan"
+                />
+              </motion.div>
+            )}
+
+            <div>
+              <label className="block text-sm font-medium text-slate-400 mb-2">Short Bio / Description</label>
+              <textarea
+                value={onboardingData.bio || ''}
+                onChange={e => setOnboardingData({...onboardingData, bio: e.target.value})}
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-white focus:border-rose-500 outline-none h-24 resize-none"
+                placeholder="Tell others about your daily routine, habits, what you study, etc."
+              ></textarea>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-slate-400 mb-3">Tags & Preferences (Select multiple)</label>
+              <div className="flex flex-wrap gap-2">
+                {PREFERENCE_TAGS.map(tag => (
+                  <button
+                    key={tag}
+                    onClick={() => togglePreference(tag)}
+                    className={`px-3 py-1.5 rounded-full text-sm border transition-all ${
+                      (onboardingData.preferences || []).includes(tag)
+                        ? 'bg-rose-500 text-white border-rose-500'
+                        : 'bg-slate-950 text-slate-400 border-slate-800 hover:border-slate-600'
+                    }`}
+                  >
+                    {tag}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <button
+              onClick={handleOnboardingSubmit}
+              disabled={!onboardingData.name || !onboardingData.branch || !onboardingData.gender}
+              className="w-full bg-gradient-to-r from-rose-500 to-orange-500 hover:from-rose-400 hover:to-orange-400 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold py-4 rounded-xl shadow-lg transition-all mt-8 text-lg"
+            >
+              Complete Profile & Enter Feed
+            </button>
+          </div>
+        </motion.div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-200 font-sans pb-24">
+      {/* TOP NAV */}
+      <header className="bg-slate-900 border-b border-slate-800 sticky top-0 z-50 px-4 py-4">
+        <div className="max-w-4xl mx-auto flex justify-between items-center">
+          <div className="flex items-center gap-2">
+            <Heart className="text-rose-500" size={24} fill="currentColor" />
+            <span className="text-xl font-bold text-white tracking-tight">Match</span>
+          </div>
+          <div className="flex items-center gap-4">
+            <span className="text-sm text-slate-400 hidden sm:inline-block">
+              {currentUser?.branch}
+            </span>
+            <div className="w-8 h-8 rounded-full bg-slate-800 border border-slate-700 overflow-hidden">
+                <img src={currentUser?.avatarUrl} alt="avatar" />
+            </div>
+          </div>
+        </div>
+      </header>
+
+      {dbError && (
+        <div className="bg-orange-500/10 border-b border-orange-500/20 px-4 py-2 flex items-center justify-center gap-2">
+          <AlertCircle size={16} className="text-orange-400" />
+          <span className="text-xs font-medium text-orange-200">Supabase tables missing. Running in local memory mode.</span>
+        </div>
+      )}
+
+      {/* MAIN CONTENT */}
+      <main className="max-w-md mx-auto p-4 mt-4">
+        
+        {view === 'feed' && (
+          <div className="space-y-6">
+            <div className="flex items-center justify-between px-2">
+              <h2 className="text-lg font-semibold text-white">Suggested for You</h2>
+              <Filter size={18} className="text-slate-400" />
+            </div>
+
+            {feedUsers.length === 0 ? (
+              <div className="text-center py-20 bg-slate-900 border border-slate-800 rounded-3xl">
+                <Users size={48} className="text-slate-700 mx-auto mb-4" />
+                <h3 className="text-lg font-medium text-white">No matches found</h3>
+                <p className="text-slate-400 mt-2">Check back later for new registrations.</p>
+              </div>
+            ) : (
+              <div className="relative">
+                {feedUsers.map((user, idx) => {
+                  const hasSentRequest = requests.some(r => r.toId === user.id && r.fromId === currentUser?.id);
+                  return (
+                    <motion.div 
+                      key={user.id}
+                      initial={{ opacity: 0, y: 20 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ delay: idx * 0.1 }}
+                      className="bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden mb-6 shadow-xl"
+                    >
+                      <div className="bg-slate-800 h-48 relative overflow-hidden flex items-center justify-center p-6">
+                         <div className="absolute inset-0 opacity-30 bg-gradient-to-br from-rose-500/20 to-purple-500/20"></div>
+                         <img src={user.avatarUrl} alt={user.name} className="w-32 h-32 rounded-full border-4 border-slate-900 bg-slate-900 relative z-10 shadow-lg" />
+                         
+                         {user.alreadyHasRoommate && (
+                           <div className="absolute top-4 right-4 bg-slate-950/80 backdrop-blur border border-slate-700 px-3 py-1.5 rounded-full flex items-center gap-2 text-xs font-medium text-slate-200">
+                             <Users size={14} className="text-rose-400" />
+                             Group of 2
+                           </div>
+                         )}
+                      </div>
+                      
+                      <div className="p-6">
+                        <div className="flex justify-between items-start mb-4">
+                          <div>
+                            <h3 className="text-2xl font-bold text-white flex items-center gap-2">
+                              {user.name}
+                              <Check size={18} className="text-blue-400 bg-blue-400/10 rounded-full p-0.5" />
+                            </h3>
+                            <p className="text-slate-400 text-sm flex items-center gap-1 mt-1">
+                              <BookOpen size={14} /> {user.branch} • Looking for {user.lookingFor}
+                            </p>
+                          </div>
+                        </div>
+
+                        {user.alreadyHasRoommate && (
+                          <div className="bg-rose-500/10 border border-rose-500/20 rounded-xl p-3 mb-4 flex items-start gap-3">
+                            <Sparkles className="text-rose-400 shrink-0 mt-0.5" size={16} />
+                            <p className="text-sm text-rose-200/90 leading-tight">
+                              Already rooming with <strong>{user.existingRoommateName}</strong>. Looking for {user.lookingFor} more person.
+                            </p>
+                          </div>
+                        )}
+
+                        <div className="mb-6">
+                          <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">About</h4>
+                          <p className="text-slate-300 text-sm leading-relaxed">{user.bio || 'No bio provided.'}</p>
+                        </div>
+
+                        <div className="mb-6">
+                           <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Preferences</h4>
+                           <div className="flex flex-wrap gap-2">
+                             {(user.preferences || []).map(pref => (
+                               <span key={pref} className="bg-slate-950 border border-slate-800 text-slate-300 px-3 py-1 rounded-full text-xs font-medium">
+                                 {pref}
+                               </span>
+                             ))}
+                             {(!user.preferences || user.preferences.length === 0) && (
+                               <span className="text-slate-500 text-sm italic">None selected</span>
+                             )}
+                           </div>
+                        </div>
+
+                        <button
+                          onClick={() => handleSendRequest(user.id)}
+                          disabled={hasSentRequest || currentUser?.lookingFor === 0}
+                          className={`w-full py-3.5 rounded-xl font-semibold flex items-center justify-center gap-2 transition-all ${
+                            hasSentRequest || currentUser?.lookingFor === 0
+                              ? 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                              : 'bg-gradient-to-r from-rose-500 to-orange-500 hover:from-rose-400 hover:to-orange-400 text-white shadow-lg shadow-rose-500/20'
+                          }`}
+                        >
+                          {currentUser?.lookingFor === 0 ? (
+                            <>Room Full</>
+                          ) : hasSentRequest ? (
+                            <>Request Sent <Check size={18} /></>
+                          ) : (
+                            <>Send Roommate Request <Send size={18} /></>
+                          )}
+                        </button>
+                      </div>
+                    </motion.div>
+                  )
+                })}
+              </div>
+            )}
           </div>
         )}
 
-        {view === 'select' && currentUser && (
-          <div className="flex justify-center mt-8">
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 md:p-8 shadow-2xl w-full max-w-2xl">
-              <div className="flex justify-between items-start mb-8">
-                <div>
-                  <h2 className="text-2xl font-bold text-white">Select Your Roommates</h2>
-                  <p className="text-slate-400 mt-1">Reg. No: {currentUser['Reg. No.']} • Branch: {currentUser.Program}</p>
-                </div>
-                <button 
-                  onClick={handleLogout}
-                  className="text-slate-500 hover:text-slate-300 transition-colors text-sm underline"
-                >
-                  Logout
-                </button>
-              </div>
-
-              {hasSubmitted && !isEditMode ? (
-                <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-6 text-center">
-                  <div className="bg-emerald-500/20 p-4 rounded-full inline-block mb-4">
-                    <Database size={32} className="text-emerald-400" />
-                  </div>
-                  <h3 className="text-xl font-bold text-white mb-2">Choices Submitted Successfully</h3>
-                  <p className="text-slate-400 mb-6">You have successfully locked in your roommate choices. You can edit them if you change your mind.</p>
-                  
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8 text-left">
-                    {selectedRoommates.map((r, i) => (
-                      <div key={r['Reg. No.']} className="bg-slate-950 border border-slate-800 rounded-lg p-4 flex items-center gap-3">
-                         <div className="w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center text-slate-400 font-bold text-sm">
-                           {i+1}
-                         </div>
-                         <div>
-                            <p className="text-white font-medium text-sm">{r.Name}</p>
-                            <p className="text-slate-500 text-xs">{r['Reg. No.']} • {r.Program}</p>
-                         </div>
-                      </div>
-                    ))}
-                  </div>
-
-                  <button 
-                    onClick={() => setIsEditMode(true)}
-                    className="bg-slate-800 hover:bg-slate-700 text-white px-6 py-2.5 rounded-lg font-medium transition-colors border border-slate-700 shadow-lg flex justify-center items-center gap-2 mx-auto"
-                  >
-                    <Edit2 size={18} /> Edit Choices
-                  </button>
+        {view === 'requests' && (
+          <div className="space-y-8">
+            <div>
+              <h2 className="text-xl font-bold text-white flex items-center gap-2 mb-4">
+                <MessageSquare className="text-rose-500" />
+                Incoming Requests
+              </h2>
+              
+              {incomingRequests.length === 0 ? (
+                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 text-center text-slate-500">
+                  No new requests yet.
                 </div>
               ) : (
-                <>
-                  <div className="relative mb-8">
-                    <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
-                      <Search size={18} className="text-slate-500" />
-                    </div>
-                    <input 
-                      type="text" 
-                      placeholder="Search male students by name or reg no..."
-                      className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-11 pr-4 py-4 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 shadow-inner" 
-                      value={searchQuery} 
-                      onChange={e => setSearchQuery(e.target.value)}
-                      disabled={selectedRoommates.length >= 2}
-                    />
-                    
-                    {/* Search Results Dropdown */}
-                    {searchQuery && (
-                      <div className="absolute z-10 w-full mt-2 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl overflow-hidden divide-y divide-slate-700">
-                        {filteredStudents.length > 0 ? (
-                          filteredStudents.map(student => {
-                            const isAlreadyRegistered = registeredStudents[student['Reg. No.']] && registeredStudents[student['Reg. No.']] !== currentUser?.['Reg. No.'];
-                            return (
-                              <button
-                                key={student['Reg. No.']}
-                                onClick={() => addRoommate(student)}
-                                disabled={!!isAlreadyRegistered}
-                                className={`w-full text-left px-4 py-3 flex justify-between items-center group ${isAlreadyRegistered ? 'opacity-50 cursor-not-allowed bg-slate-800/80' : 'hover:bg-slate-700/50 transition-colors'}`}
-                              >
-                                <div>
-                                  <div className={`font-medium transition-colors ${isAlreadyRegistered ? 'text-slate-500' : 'text-white group-hover:text-blue-400'}`}>
-                                    {student.Name}
-                                  </div>
-                                  <div className="text-slate-400 text-sm flex items-center gap-2">
-                                    <span>{student['Reg. No.']} • {student.Program}</span>
-                                    {isAlreadyRegistered && (
-                                      <span className="text-red-400 text-xs font-semibold bg-red-400/10 px-2 py-0.5 rounded-full border border-red-500/20">
-                                        Already registered with {registeredStudents[student['Reg. No.']]}
-                                      </span>
-                                    )}
-                                  </div>
-                                </div>
-                                {!isAlreadyRegistered && <UserPlus size={18} className="text-slate-500 group-hover:text-blue-400 transition-colors" />}
-                              </button>
-                            );
-                          })
-                        ) : (
-                          <div className="px-4 py-4 text-slate-400 text-center text-sm">
-                            No matching male students found.
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="space-y-4 mb-8">
-                    <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-2">Selected Roommates ({selectedRoommates.length}/2)</h3>
-                    
-                    {selectedRoommates.map((r, i) => (
-                      <div key={r['Reg. No.']} className="flex justify-between items-center bg-slate-950 border border-slate-700 rounded-lg p-4">
-                        <div>
-                          <span className="text-slate-400 text-sm uppercase font-semibold mr-3 tracking-wider">Roommate {i + 1}</span>
-                          <span className="text-white font-medium">{r.Name}</span>
-                          <span className="text-slate-500 text-sm ml-2">({r['Reg. No.']} • {r.Program})</span>
+                <div className="space-y-4">
+                  {incomingRequests.map(req => {
+                    const fromUser = allUsers.find(u => u.id === req.fromId);
+                    if (!fromUser) return null;
+                    return (
+                      <div key={req.id} className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex gap-4 items-center">
+                        <img src={fromUser.avatarUrl} alt={fromUser.name} className="w-16 h-16 rounded-full bg-slate-800" />
+                        <div className="flex-1 min-w-0">
+                          <h3 className="text-white font-medium truncate">{fromUser.name}</h3>
+                          {fromUser.alreadyHasRoommate && <p className="text-rose-400 text-[10px] uppercase font-bold tracking-wider mt-0.5">Group of 2</p>}
+                          <p className="text-slate-400 text-xs mt-1 truncate">{fromUser.bio}</p>
                         </div>
-                        <button 
-                          onClick={() => removeRoommate(r['Reg. No.'])}
-                          className="text-red-400 hover:text-red-300 p-1 bg-red-400/10 rounded-md transition-colors"
-                        >
-                          <X size={18} />
-                        </button>
+                        <div className="flex flex-col gap-2 shrink-0">
+                          <button 
+                            onClick={() => handleAcceptRequest(req.id)}
+                            className="bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 p-2 rounded-lg transition-colors"
+                          >
+                            <Check size={18} />
+                          </button>
+                        </div>
                       </div>
-                    ))}
+                    )
+                  })}
+                </div>
+              )}
+            </div>
 
-                    {[...Array(2 - selectedRoommates.length)].map((_, i) => (
-                      <div key={`empty-${i}`} className="flex items-center bg-slate-950/50 border border-dashed border-slate-700 rounded-lg p-4 text-slate-500">
-                        <span className="text-sm uppercase font-semibold mr-3 tracking-wider">Roommate {selectedRoommates.length + i + 1}</span>
-                        <span className="italic">Waiting for selection...</span>
+            <div>
+              <h2 className="text-xl font-bold text-white flex items-center gap-2 mb-4">
+                <Send className="text-slate-500" />
+                Sent Requests
+              </h2>
+              {outgoingRequests.length === 0 ? (
+                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 text-center text-slate-500">
+                  You haven't sent any requests.
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {outgoingRequests.map(req => {
+                    const toUser = allUsers.find(u => u.id === req.toId);
+                    if (!toUser) return null;
+                    return (
+                      <div key={req.id} className="bg-slate-900 border border-slate-800 rounded-xl p-3 flex justify-between items-center">
+                        <div className="flex items-center gap-3">
+                          <img src={toUser.avatarUrl} alt={toUser.name} className="w-10 h-10 rounded-full bg-slate-800" />
+                          <span className="text-slate-300 text-sm font-medium">{toUser.name}</span>
+                        </div>
+                        <span className="text-xs font-semibold bg-slate-800 text-slate-400 px-2 py-1 rounded-md uppercase tracking-wider">
+                          {req.status}
+                        </span>
                       </div>
-                    ))}
-                  </div>
-
-                  <div className="flex gap-3">
-                    {isEditMode && (
-                      <button 
-                        onClick={() => setIsEditMode(false)}
-                        className="flex-1 bg-slate-800 hover:bg-slate-700 text-white py-3 rounded-lg font-medium transition-colors border border-slate-700 shadow-lg"
-                      >
-                        Cancel
-                      </button>
-                    )}
-                    <button 
-                      onClick={handleSubmitGroup}
-                      disabled={selectedRoommates.length !== 2}
-                      className="flex-[2] bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 disabled:text-slate-500 text-white py-3 rounded-lg font-medium transition-colors border border-emerald-500 shadow-lg flex justify-center items-center gap-2"
-                    >
-                      {isEditMode ? 'Update Choices in Database' : 'Submit Choices to Database'} <ArrowRight size={18} />
-                    </button>
-                  </div>
-                </>
+                    )
+                  })}
+                </div>
               )}
             </div>
           </div>
         )}
 
-        {view === 'dashboard' && (
+        {view === 'profile' && (
           <div className="space-y-6">
-            <div className="flex items-center justify-between">
-              <h2 className="text-xl font-semibold text-white flex items-center gap-2">
-                <LayoutDashboard size={20} className="text-slate-400" />
-                Live Dashboard
-              </h2>
-            </div>
-            
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl relative overflow-hidden text-center mb-6">
-               <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-blue-500 to-purple-500"></div>
-               <div className="inline-flex items-center justify-center bg-blue-500/10 p-4 rounded-full border border-blue-500/20 mb-6 animate-pulse">
-                  <Database size={48} className="text-blue-400" />
-               </div>
-               <h3 className="text-4xl font-bold text-white mb-2">{totalRegistered * 3}</h3>
-               <p className="text-xl font-medium text-slate-300 mb-2">Total Students Registered in the System</p>
-               <p className="text-slate-500 mb-6">({totalRegistered} independent groups formed)</p>
-
-               <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-4 inline-block text-left mb-2">
-                 <p className="text-sm text-blue-200/90 leading-relaxed">
-                    <strong>Update:</strong> A list of dummy roommates to fill the official form will be generated today at 9 PM, on the basis of entries received till then.
-                 </p>
-               </div>
+            <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 text-center shadow-xl">
+               <img src={currentUser?.avatarUrl} alt="You" className="w-24 h-24 rounded-full mx-auto mb-4 border-4 border-slate-950 bg-slate-800" />
+               <h2 className="text-2xl font-bold text-white mb-1">{currentUser?.name}</h2>
+               <p className="text-slate-400 text-sm mb-6">{currentUser?.email}</p>
                
-               <div className="mt-6 flex justify-center">
-                 <div className="bg-slate-950 border border-slate-800 rounded-lg py-3 px-6 inline-flex items-center gap-3">
-                   <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></div>
-                   <span className="text-slate-400 text-sm font-medium">Real-time database sync active</span>
+               {currentUser?.alreadyHasRoommate ? (
+                 <div className="bg-rose-500/10 border border-rose-500/20 rounded-xl p-4 text-left">
+                   <h4 className="text-sm font-semibold text-rose-400 mb-2 flex items-center gap-2"><Users size={16}/> Your Current Group</h4>
+                   <p className="text-rose-100/80 text-sm">You are currently paired with <strong>{currentUser.existingRoommateName}</strong>. You are looking for {currentUser.lookingFor} more person.</p>
                  </div>
-               </div>
+               ) : (
+                 <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 text-left">
+                   <h4 className="text-sm font-semibold text-slate-300 mb-2 flex items-center gap-2"><User size={16}/> Solo</h4>
+                   <p className="text-slate-400 text-sm">You are looking for {currentUser?.lookingFor} more roommates to form a group.</p>
+                 </div>
+               )}
             </div>
 
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
-              <h3 className="text-lg font-semibold text-white mb-6 flex items-center gap-2">
-                <Users size={18} className="text-slate-400" />
-                Branch-wise Registration Stats
-              </h3>
-              
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                {Object.entries(branchStats).sort((a, b) => b[1] - a[1]).map(([branch, count]) => (
-                  <div key={branch} className="bg-slate-950 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
-                    <span className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">{branch}</span>
-                    <div className="flex items-end justify-between">
-                      <span className="text-2xl font-bold text-emerald-400">{count}</span>
-                      <span className="text-slate-500 text-sm mb-1">students</span>
-                    </div>
-                  </div>
-                ))}
-                {Object.keys(branchStats).length === 0 && (
-                  <div className="col-span-full text-center text-slate-500 py-8">
-                    No data available yet.
-                  </div>
-                )}
-              </div>
-            </div>
+            <button
+              onClick={handleSignOut}
+              className="w-full bg-slate-900 hover:bg-slate-800 text-rose-400 border border-slate-800 py-4 rounded-2xl font-medium transition-colors flex items-center justify-center gap-2"
+            >
+              <LogOut size={18} /> Sign Out
+            </button>
           </div>
         )}
 
-      </div>
+      </main>
+
+      {/* BOTTOM NAV */}
+      <nav className="fixed bottom-0 w-full bg-slate-950/90 backdrop-blur-lg border-t border-slate-800 pb-safe">
+        <div className="max-w-md mx-auto flex justify-around px-2 py-3">
+          <button 
+            onClick={() => setView('feed')}
+            className={`flex flex-col items-center gap-1 p-2 w-16 transition-colors ${view === 'feed' ? 'text-rose-500' : 'text-slate-500 hover:text-slate-300'}`}
+          >
+            <Users size={24} className={view === 'feed' ? 'fill-rose-500/20' : ''} />
+            <span className="text-[10px] font-semibold uppercase tracking-wider">Feed</span>
+          </button>
+          <button 
+            onClick={() => setView('requests')}
+            className={`flex flex-col items-center gap-1 p-2 w-16 transition-colors relative ${view === 'requests' ? 'text-rose-500' : 'text-slate-500 hover:text-slate-300'}`}
+          >
+            <div className="relative">
+              <MessageSquare size={24} className={view === 'requests' ? 'fill-rose-500/20' : ''} />
+              {incomingRequests.length > 0 && (
+                <span className="absolute -top-1 -right-1 w-3 h-3 bg-rose-500 rounded-full border-2 border-slate-950"></span>
+              )}
+            </div>
+            <span className="text-[10px] font-semibold uppercase tracking-wider">Requests</span>
+          </button>
+          <button 
+            onClick={() => setView('profile')}
+            className={`flex flex-col items-center gap-1 p-2 w-16 transition-colors ${view === 'profile' ? 'text-rose-500' : 'text-slate-500 hover:text-slate-300'}`}
+          >
+            <User size={24} className={view === 'profile' ? 'fill-rose-500/20' : ''} />
+            <span className="text-[10px] font-semibold uppercase tracking-wider">Profile</span>
+          </button>
+        </div>
+      </nav>
     </div>
   );
 }
