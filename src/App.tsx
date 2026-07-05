@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect } from 'react';
 import { STUDENT_DATABASE, BaseStudent } from './data/students';
-import { Database, Users, LayoutDashboard, UserPlus, Search, LogIn, ArrowRight, X, Edit2 } from 'lucide-react';
+import { Database, Users, LayoutDashboard, UserPlus, Search, LogIn, ArrowRight, X, Edit2, AlertCircle } from 'lucide-react';
 import { supabase } from './lib/supabase';
 
 export default function App() {
@@ -18,6 +18,8 @@ export default function App() {
 
   // Dashboard State
   const [totalRegistered, setTotalRegistered] = useState<number>(0);
+  const [branchStats, setBranchStats] = useState<Record<string, number>>({});
+  const [registeredStudents, setRegisteredStudents] = useState<Record<string, string>>({});
 
   // --- DATABASE SYNC ---
   useEffect(() => {
@@ -53,12 +55,28 @@ export default function App() {
     // Fetch total registered count
     const fetchTotal = async () => {
       try {
-        const { count, error } = await supabase
+        const { data, error } = await supabase
           .from('roommate_selections')
-          .select('*', { count: 'exact', head: true });
+          .select('reg_no, roommate1_reg_no, roommate2_reg_no');
         
-        if (count !== null && !error) {
-          setTotalRegistered(count);
+        if (data && !error) {
+          setTotalRegistered(data.length);
+
+          const stats: Record<string, number> = {};
+          const registeredMap: Record<string, string> = {};
+          data.forEach(row => {
+            const regs = [row.reg_no, row.roommate1_reg_no, row.roommate2_reg_no];
+            regs.forEach(reg => {
+              registeredMap[reg] = row.reg_no;
+              const student = STUDENT_DATABASE.find(s => s['Reg. No.'] === reg);
+              if (student) {
+                stats[student.Program] = (stats[student.Program] || 0) + 1;
+              }
+            });
+          });
+          
+          setBranchStats(stats);
+          setRegisteredStudents(registeredMap);
         }
       } catch (err) {
         console.error(err);
@@ -133,7 +151,8 @@ export default function App() {
       options: {
         redirectTo: window.location.origin,
         queryParams: {
-          prompt: 'select_account'
+          prompt: 'select_account',
+          hd: 'nitdgp.ac.in'
         }
       }
     });
@@ -237,10 +256,25 @@ export default function App() {
                 </div>
               </div>
               <h2 className="text-2xl font-bold text-center text-white mb-2">Institute Login</h2>
-              <p className="text-center text-slate-400 mb-8 text-sm">
+              <p className="text-center text-slate-400 mb-6 text-sm">
                 Sign in with your official institute Google account to continue.
               </p>
               
+              <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-4 mb-6 flex items-start gap-3 flex-col">
+                <div className="flex items-start gap-3">
+                  <AlertCircle className="text-amber-400 shrink-0 mt-0.5" size={20} />
+                  <p className="text-sm text-amber-200/90 leading-relaxed">
+                    <strong>Important:</strong> Only register yourself and your roommates if you are confirmed to change rooms unofficially later.
+                  </p>
+                </div>
+                <div className="flex items-start gap-3">
+                  <AlertCircle className="text-amber-400 shrink-0 mt-0.5" size={20} />
+                  <p className="text-sm text-amber-200/90 leading-relaxed">
+                    <strong>Notice:</strong> Register only if you haven't filled the official form of roommates yet.
+                  </p>
+                </div>
+              </div>
+
               <div className="space-y-4">
                 {loginError && <p className="text-red-400 text-sm mt-2 text-center bg-red-400/10 p-3 rounded-lg border border-red-500/20">{loginError}</p>}
                 
@@ -314,7 +348,7 @@ export default function App() {
                     </div>
                     <input 
                       type="text" 
-                      placeholder="Search students by name or reg no..."
+                      placeholder="Search male students by name or reg no..."
                       className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-11 pr-4 py-4 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 shadow-inner" 
                       value={searchQuery} 
                       onChange={e => setSearchQuery(e.target.value)}
@@ -325,22 +359,35 @@ export default function App() {
                     {searchQuery && (
                       <div className="absolute z-10 w-full mt-2 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl overflow-hidden divide-y divide-slate-700">
                         {filteredStudents.length > 0 ? (
-                          filteredStudents.map(student => (
-                            <button
-                              key={student['Reg. No.']}
-                              onClick={() => addRoommate(student)}
-                              className="w-full text-left px-4 py-3 hover:bg-slate-700/50 transition-colors flex justify-between items-center group"
-                            >
-                              <div>
-                                <div className="text-white font-medium group-hover:text-blue-400 transition-colors">{student.Name}</div>
-                                <div className="text-slate-400 text-sm">{student['Reg. No.']} • {student.Program}</div>
-                              </div>
-                              <UserPlus size={18} className="text-slate-500 group-hover:text-blue-400 transition-colors" />
-                            </button>
-                          ))
+                          filteredStudents.map(student => {
+                            const isAlreadyRegistered = registeredStudents[student['Reg. No.']] && registeredStudents[student['Reg. No.']] !== currentUser?.['Reg. No.'];
+                            return (
+                              <button
+                                key={student['Reg. No.']}
+                                onClick={() => addRoommate(student)}
+                                disabled={!!isAlreadyRegistered}
+                                className={`w-full text-left px-4 py-3 flex justify-between items-center group ${isAlreadyRegistered ? 'opacity-50 cursor-not-allowed bg-slate-800/80' : 'hover:bg-slate-700/50 transition-colors'}`}
+                              >
+                                <div>
+                                  <div className={`font-medium transition-colors ${isAlreadyRegistered ? 'text-slate-500' : 'text-white group-hover:text-blue-400'}`}>
+                                    {student.Name}
+                                  </div>
+                                  <div className="text-slate-400 text-sm flex items-center gap-2">
+                                    <span>{student['Reg. No.']} • {student.Program}</span>
+                                    {isAlreadyRegistered && (
+                                      <span className="text-red-400 text-xs font-semibold bg-red-400/10 px-2 py-0.5 rounded-full border border-red-500/20">
+                                        Already registered with {registeredStudents[student['Reg. No.']]}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                                {!isAlreadyRegistered && <UserPlus size={18} className="text-slate-500 group-hover:text-blue-400 transition-colors" />}
+                              </button>
+                            );
+                          })
                         ) : (
                           <div className="px-4 py-4 text-slate-400 text-center text-sm">
-                            No matching students found in your branch.
+                            No matching male students found.
                           </div>
                         )}
                       </div>
@@ -406,21 +453,51 @@ export default function App() {
               </h2>
             </div>
             
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl relative overflow-hidden text-center">
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl relative overflow-hidden text-center mb-6">
                <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-blue-500 to-purple-500"></div>
                <div className="inline-flex items-center justify-center bg-blue-500/10 p-4 rounded-full border border-blue-500/20 mb-6 animate-pulse">
                   <Database size={48} className="text-blue-400" />
                </div>
                <h3 className="text-4xl font-bold text-white mb-2">{totalRegistered * 3}</h3>
                <p className="text-xl font-medium text-slate-300 mb-2">Total Students Registered in the System</p>
-               <p className="text-slate-500">({totalRegistered} independent groups formed)</p>
+               <p className="text-slate-500 mb-6">({totalRegistered} independent groups formed)</p>
+
+               <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-4 inline-block text-left mb-2">
+                 <p className="text-sm text-blue-200/90 leading-relaxed">
+                    <strong>Update:</strong> A list of dummy roommates to fill the official form will be generated today at 9 PM, on the basis of entries received till then.
+                 </p>
+               </div>
                
-               <div className="mt-8 flex justify-center">
+               <div className="mt-6 flex justify-center">
                  <div className="bg-slate-950 border border-slate-800 rounded-lg py-3 px-6 inline-flex items-center gap-3">
                    <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></div>
                    <span className="text-slate-400 text-sm font-medium">Real-time database sync active</span>
                  </div>
                </div>
+            </div>
+
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+              <h3 className="text-lg font-semibold text-white mb-6 flex items-center gap-2">
+                <Users size={18} className="text-slate-400" />
+                Branch-wise Registration Stats
+              </h3>
+              
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                {Object.entries(branchStats).sort((a, b) => b[1] - a[1]).map(([branch, count]) => (
+                  <div key={branch} className="bg-slate-950 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
+                    <span className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">{branch}</span>
+                    <div className="flex items-end justify-between">
+                      <span className="text-2xl font-bold text-emerald-400">{count}</span>
+                      <span className="text-slate-500 text-sm mb-1">students</span>
+                    </div>
+                  </div>
+                ))}
+                {Object.keys(branchStats).length === 0 && (
+                  <div className="col-span-full text-center text-slate-500 py-8">
+                    No data available yet.
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         )}
