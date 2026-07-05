@@ -74,8 +74,8 @@ export default function App() {
       const userEmail = currentSession.user.email || '';
       
       // Strict Institute Email Check
-      if (!userEmail.endsWith('@institute.edu')) {
-        setAuthError('Only @institute.edu emails are allowed to access this network.');
+      if (!userEmail.endsWith('@nitdgp.ac.in')) {
+        setAuthError('Only @nitdgp.ac.in emails are allowed to access this network.');
         await supabase.auth.signOut();
         setIsLoading(false);
         return;
@@ -98,7 +98,7 @@ export default function App() {
         options: {
           queryParams: {
             // Optional: prefill hosted domain to restrict google account picker
-            hd: 'institute.edu'
+            hd: 'nitdgp.ac.in'
           }
         }
       });
@@ -349,7 +349,7 @@ export default function App() {
           
           <div className="mt-6 flex items-center justify-center gap-2 text-sm text-slate-500">
             <Shield size={14} />
-            <span>Secure @institute.edu network</span>
+            <span>Secure @nitdgp.ac.in network</span>
           </div>
         </motion.div>
       </div>
