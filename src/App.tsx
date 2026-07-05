@@ -100,8 +100,7 @@ export default function App() {
 
   // --- LOGIN LOGIC ---
   useEffect(() => {
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      (event, session) => {
+    const handleSession = (session: any) => {
         if (session?.user?.email) {
           const email = session.user.email;
           
@@ -125,11 +124,27 @@ export default function App() {
             setCurrentUser(student);
             setView('select');
             setLoginError('');
+            
+            // clear hash from URL for cleaner look
+            if (window.location.hash) {
+              window.history.replaceState(null, '', window.location.pathname);
+            }
           } else {
             setLoginError(`Reg. No. ${regNo} not found in the official database.`);
             supabase.auth.signOut();
           }
-        } else if (event === 'SIGNED_OUT') {
+        }
+    };
+
+    // Check initial session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+       handleSession(session);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      (event, session) => {
+        handleSession(session);
+        if (event === 'SIGNED_OUT') {
             setCurrentUser(null);
             setView('login');
             setSelectedRoommates([]);
