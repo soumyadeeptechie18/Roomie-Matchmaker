@@ -1,14 +1,10 @@
 import { useState, useMemo, useEffect } from 'react';
-import { runMatchmakingEngine } from './engine';
-import { StudentProfile, MatchmakingResult } from './types';
-import TicketCard from './components/TicketCard';
 import { STUDENT_DATABASE, BaseStudent } from './data/students';
-import { Database, Users, LayoutDashboard, UserPlus, Play, List, Trash2, Search, LogIn, ArrowRight, X } from 'lucide-react';
+import { Database, Users, LayoutDashboard, UserPlus, Search, LogIn, ArrowRight, X, Edit2 } from 'lucide-react';
 import { supabase } from './lib/supabase';
 
 export default function App() {
   const [view, setView] = useState<'login' | 'select' | 'dashboard'>('login');
-  const [pool, setPool] = useState<StudentProfile[]>([]);
   const [currentUser, setCurrentUser] = useState<BaseStudent | null>(null);
 
   // Login State
@@ -17,10 +13,72 @@ export default function App() {
   // Select State
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedRoommates, setSelectedRoommates] = useState<BaseStudent[]>([]);
+  const [isEditMode, setIsEditMode] = useState(false);
+  const [hasSubmitted, setHasSubmitted] = useState(false);
 
   // Dashboard State
-  const [result, setResult] = useState<MatchmakingResult | null>(null);
-  const [activeTab, setActiveTab] = useState<'database' | 'results'>('database');
+  const [totalRegistered, setTotalRegistered] = useState<number>(0);
+
+  // --- DATABASE SYNC ---
+  useEffect(() => {
+    if (!currentUser) return;
+    
+    // Check if user already submitted
+    const checkExistingSubmission = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('roommate_selections')
+          .select('*')
+          .eq('reg_no', currentUser['Reg. No.'])
+          .maybeSingle();
+          
+        if (data) {
+          setHasSubmitted(true);
+          const r1 = STUDENT_DATABASE.find(s => s['Reg. No.'] === data.roommate1_reg_no);
+          const r2 = STUDENT_DATABASE.find(s => s['Reg. No.'] === data.roommate2_reg_no);
+          if (r1 && r2) {
+            setSelectedRoommates([r1, r2]);
+          }
+          setView('dashboard');
+        }
+      } catch (err) {
+        console.error("Error fetching submission:", err);
+      }
+    };
+    
+    checkExistingSubmission();
+  }, [currentUser]);
+
+  useEffect(() => {
+    // Fetch total registered count
+    const fetchTotal = async () => {
+      try {
+        const { count, error } = await supabase
+          .from('roommate_selections')
+          .select('*', { count: 'exact', head: true });
+        
+        if (count !== null && !error) {
+          setTotalRegistered(count);
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    };
+
+    fetchTotal();
+
+    // Subscribe to realtime changes
+    const subscription = supabase
+      .channel('roommate_selections_changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'roommate_selections' }, () => {
+        fetchTotal();
+      })
+      .subscribe();
+
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, []);
 
   // --- LOGIN LOGIC ---
   useEffect(() => {
@@ -56,6 +114,9 @@ export default function App() {
         } else if (event === 'SIGNED_OUT') {
             setCurrentUser(null);
             setView('login');
+            setSelectedRoommates([]);
+            setHasSubmitted(false);
+            setIsEditMode(false);
         }
       }
     );
@@ -66,12 +127,6 @@ export default function App() {
   const handleLogin = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setLoginError('');
-
-    // Check if running in iframe (AI Studio preview)
-    if (window !== window.top) {
-      setLoginError("Google Sign-in cannot run inside this preview window. Please click the 'Open in New Tab' icon (↗️) at the top right of the preview pane to log in.");
-      return;
-    }
     
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
@@ -96,6 +151,7 @@ export default function App() {
   const filteredStudents = useMemo(() => {
     if (!searchQuery) return [];
     return STUDENT_DATABASE.filter(s => 
+      s.Gender === 'M' &&
       s['Reg. No.'] !== currentUser?.['Reg. No.'] && 
       !selectedRoommates.some(r => r['Reg. No.'] === s['Reg. No.']) &&
       (s.Name.toLowerCase().includes(searchQuery.toLowerCase()) || s['Reg. No.'].toLowerCase().includes(searchQuery.toLowerCase()))
@@ -113,77 +169,61 @@ export default function App() {
     setSelectedRoommates(selectedRoommates.filter(r => r['Reg. No.'] !== regNo));
   };
 
-  const handleSubmitGroup = () => {
+  const handleSubmitGroup = async () => {
     if (selectedRoommates.length !== 2 || !currentUser) return;
     
-    // Automatically load all three entries acting as mutual desires for simplicity of the workflow demo
-    const newEntries: StudentProfile[] = [
-      { ...currentUser, desired: [selectedRoommates[0]['Reg. No.'], selectedRoommates[1]['Reg. No.']] },
-      { ...selectedRoommates[0], desired: [currentUser['Reg. No.'], selectedRoommates[1]['Reg. No.']] },
-      { ...selectedRoommates[1], desired: [currentUser['Reg. No.'], selectedRoommates[0]['Reg. No.']] }
-    ];
-
-    // Remove old entries for these Reg. No.s if they exist in the pool to prevent duplicates
-    const targetRegs = [currentUser['Reg. No.'], selectedRoommates[0]['Reg. No.'], selectedRoommates[1]['Reg. No.']];
-    const filteredPool = pool.filter(p => !targetRegs.includes(p['Reg. No.']));
-    
-    setPool([...filteredPool, ...newEntries]);
-    setSelectedRoommates([]); // reset selection
-    setView('dashboard');
-    setActiveTab('database');
-  };
-
-  // --- DASHBOARD LOGIC ---
-  const handleRunEngine = () => {
     try {
-      const output = runMatchmakingEngine(pool);
-      setResult(output);
-      setActiveTab('results');
-    } catch (e: any) {
-      console.error(e);
-      alert("Error running engine. Please check your data.");
-    }
-  };
+      const { error } = await supabase.from('roommate_selections').upsert({
+        reg_no: currentUser['Reg. No.'],
+        roommate1_reg_no: selectedRoommates[0]['Reg. No.'],
+        roommate2_reg_no: selectedRoommates[1]['Reg. No.']
+      });
 
-  const clearDatabase = () => {
-    if (confirm("Are you sure you want to clear the database?")) {
-      setPool([]);
-      setResult(null);
+      if (error) throw error;
+
+      setHasSubmitted(true);
+      setIsEditMode(false);
+      setView('dashboard');
+    } catch (err: any) {
+      console.error(err);
+      alert("Error saving your roommates to the database. Have you created the table in Supabase yet?");
     }
   };
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-200 font-sans p-4 md:p-8 flex justify-center">
-      <div className="max-w-6xl w-full space-y-8">
+    <div className="min-h-screen bg-slate-950 text-slate-200 font-sans selection:bg-blue-500/30 selection:text-blue-200">
+      <div className="max-w-6xl mx-auto p-4 sm:p-6 lg:p-8">
         
-        {/* Header always visible */}
-        <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-800 pb-6">
-          <div>
-            <h1 className="text-3xl font-bold text-white flex items-center gap-3">
-              <Database className="text-blue-500" />
-              Roomie Matchmaker
-            </h1>
-            <p className="text-slate-400 mt-2">
-              Cross-branch roommate clustering & post-allocation swap mapping.
-            </p>
-          </div>
-          {view === 'dashboard' && (
-            <div className="flex gap-4">
-              <button 
-                onClick={() => setView('select')}
-                className="text-slate-400 hover:text-white transition-colors flex items-center gap-2 font-medium"
-              >
-                <UserPlus size={18} /> Add More
-              </button>
-              <button 
-                onClick={handleRunEngine}
-                disabled={pool.length === 0}
-                className="bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 text-white px-6 py-2.5 rounded-lg font-medium transition-colors shadow-lg shadow-blue-500/20 flex items-center gap-2"
-              >
-                <Play size={18} /> Run Engine
-              </button>
+        {/* HEADER */}
+        <header className="flex flex-col sm:flex-row justify-between items-center mb-10 pb-6 border-b border-slate-800">
+          <div className="flex items-center gap-3 mb-4 sm:mb-0">
+            <div className="bg-gradient-to-br from-blue-500 to-emerald-400 p-2.5 rounded-xl shadow-lg shadow-blue-500/20">
+              <Users size={28} className="text-white" />
             </div>
-          )}
+            <div>
+              <h1 className="text-2xl font-bold text-white tracking-tight">Hostel Match</h1>
+              <p className="text-slate-400 text-sm font-medium">B.Tech Second Year (2025)</p>
+            </div>
+          </div>
+          
+          <div className="flex gap-3">
+            {currentUser && (
+              <>
+                <button 
+                  onClick={() => setView('select')}
+                  className={`px-4 py-2 rounded-lg font-medium transition-all ${view === 'select' ? 'bg-slate-800 text-white shadow-inner' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'}`}
+                >
+                  My Group
+                </button>
+                <button 
+                  onClick={() => setView('dashboard')}
+                  className={`px-4 py-2 rounded-lg font-medium transition-all ${view === 'dashboard' ? 'bg-slate-800 text-white shadow-inner' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'}`}
+                >
+                  Dashboard
+                </button>
+              </>
+            )}
+          </div>
         </header>
 
         {/* VIEWS */}
@@ -193,7 +233,7 @@ export default function App() {
               <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-blue-500 to-emerald-400"></div>
               <div className="flex justify-center mb-6">
                 <div className="bg-blue-500/10 p-4 rounded-full border border-blue-500/20">
-                  <LogIn className="text-blue-400" size={32} />
+                  <LogIn size={32} className="text-blue-400" />
                 </div>
               </div>
               <h2 className="text-2xl font-bold text-center text-white mb-2">Institute Login</h2>
@@ -223,11 +263,10 @@ export default function App() {
 
         {view === 'select' && currentUser && (
           <div className="flex justify-center mt-8">
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl w-full max-w-2xl relative overflow-hidden">
-              <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-emerald-500 to-purple-400"></div>
-              <div className="flex justify-between items-center mb-6 pb-6 border-b border-slate-800">
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 md:p-8 shadow-2xl w-full max-w-2xl">
+              <div className="flex justify-between items-start mb-8">
                 <div>
-                  <h2 className="text-2xl font-bold text-white">Welcome, {currentUser.Name}</h2>
+                  <h2 className="text-2xl font-bold text-white">Select Your Roommates</h2>
                   <p className="text-slate-400 mt-1">Reg. No: {currentUser['Reg. No.']} • Branch: {currentUser.Program}</p>
                 </div>
                 <button 
@@ -238,68 +277,122 @@ export default function App() {
                 </button>
               </div>
 
-              <h3 className="text-lg font-semibold text-white mb-4">Select Target Roommates (Choose 2)</h3>
-              
-              <div className="relative mb-6">
-                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                  <Search size={18} className="text-slate-500" />
-                </div>
-                <input 
-                  type="text" 
-                  placeholder="Search by name or Reg. No..."
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg pl-10 pr-4 py-3 text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500" 
-                  value={searchQuery}
-                  onChange={e => setSearchQuery(e.target.value)}
-                  disabled={selectedRoommates.length >= 2}
-                />
-                
-                {filteredStudents.length > 0 && selectedRoommates.length < 2 && (
-                  <div className="absolute z-10 w-full mt-2 bg-slate-800 border border-slate-700 rounded-lg shadow-xl overflow-hidden">
-                    {filteredStudents.map(s => (
-                      <button
-                        key={s['Reg. No.']}
-                        onClick={() => addRoommate(s)}
-                        className="w-full text-left px-4 py-3 hover:bg-slate-700 flex justify-between items-center transition-colors border-b border-slate-700/50 last:border-0"
-                      >
-                        <span className="text-white font-medium">{s.Name}</span>
-                        <span className="text-slate-400 text-sm">{s['Reg. No.']} • {s.Program}</span>
-                      </button>
+              {hasSubmitted && !isEditMode ? (
+                <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-6 text-center">
+                  <div className="bg-emerald-500/20 p-4 rounded-full inline-block mb-4">
+                    <Database size={32} className="text-emerald-400" />
+                  </div>
+                  <h3 className="text-xl font-bold text-white mb-2">Choices Submitted Successfully</h3>
+                  <p className="text-slate-400 mb-6">You have successfully locked in your roommate choices. You can edit them if you change your mind.</p>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8 text-left">
+                    {selectedRoommates.map((r, i) => (
+                      <div key={r['Reg. No.']} className="bg-slate-950 border border-slate-800 rounded-lg p-4 flex items-center gap-3">
+                         <div className="w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center text-slate-400 font-bold text-sm">
+                           {i+1}
+                         </div>
+                         <div>
+                            <p className="text-white font-medium text-sm">{r.Name}</p>
+                            <p className="text-slate-500 text-xs">{r['Reg. No.']} • {r.Program}</p>
+                         </div>
+                      </div>
                     ))}
                   </div>
-                )}
-              </div>
 
-              <div className="space-y-3 mb-8">
-                {selectedRoommates.map((r, i) => (
-                  <div key={r['Reg. No.']} className="flex justify-between items-center bg-slate-950 border border-slate-700 rounded-lg p-4">
-                    <div>
-                      <span className="text-slate-400 text-sm uppercase font-semibold mr-3 tracking-wider">Roommate {i + 1}</span>
-                      <span className="text-white font-medium">{r.Name}</span>
-                      <span className="text-slate-500 text-sm ml-2">({r['Reg. No.']} • {r.Program})</span>
+                  <button 
+                    onClick={() => setIsEditMode(true)}
+                    className="bg-slate-800 hover:bg-slate-700 text-white px-6 py-2.5 rounded-lg font-medium transition-colors border border-slate-700 shadow-lg flex justify-center items-center gap-2 mx-auto"
+                  >
+                    <Edit2 size={18} /> Edit Choices
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <div className="relative mb-8">
+                    <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                      <Search size={18} className="text-slate-500" />
                     </div>
+                    <input 
+                      type="text" 
+                      placeholder="Search students by name or reg no..."
+                      className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-11 pr-4 py-4 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 shadow-inner" 
+                      value={searchQuery} 
+                      onChange={e => setSearchQuery(e.target.value)}
+                      disabled={selectedRoommates.length >= 2}
+                    />
+                    
+                    {/* Search Results Dropdown */}
+                    {searchQuery && (
+                      <div className="absolute z-10 w-full mt-2 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl overflow-hidden divide-y divide-slate-700">
+                        {filteredStudents.length > 0 ? (
+                          filteredStudents.map(student => (
+                            <button
+                              key={student['Reg. No.']}
+                              onClick={() => addRoommate(student)}
+                              className="w-full text-left px-4 py-3 hover:bg-slate-700/50 transition-colors flex justify-between items-center group"
+                            >
+                              <div>
+                                <div className="text-white font-medium group-hover:text-blue-400 transition-colors">{student.Name}</div>
+                                <div className="text-slate-400 text-sm">{student['Reg. No.']} • {student.Program}</div>
+                              </div>
+                              <UserPlus size={18} className="text-slate-500 group-hover:text-blue-400 transition-colors" />
+                            </button>
+                          ))
+                        ) : (
+                          <div className="px-4 py-4 text-slate-400 text-center text-sm">
+                            No matching students found in your branch.
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="space-y-4 mb-8">
+                    <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-2">Selected Roommates ({selectedRoommates.length}/2)</h3>
+                    
+                    {selectedRoommates.map((r, i) => (
+                      <div key={r['Reg. No.']} className="flex justify-between items-center bg-slate-950 border border-slate-700 rounded-lg p-4">
+                        <div>
+                          <span className="text-slate-400 text-sm uppercase font-semibold mr-3 tracking-wider">Roommate {i + 1}</span>
+                          <span className="text-white font-medium">{r.Name}</span>
+                          <span className="text-slate-500 text-sm ml-2">({r['Reg. No.']} • {r.Program})</span>
+                        </div>
+                        <button 
+                          onClick={() => removeRoommate(r['Reg. No.'])}
+                          className="text-red-400 hover:text-red-300 p-1 bg-red-400/10 rounded-md transition-colors"
+                        >
+                          <X size={18} />
+                        </button>
+                      </div>
+                    ))}
+
+                    {[...Array(2 - selectedRoommates.length)].map((_, i) => (
+                      <div key={`empty-${i}`} className="flex items-center bg-slate-950/50 border border-dashed border-slate-700 rounded-lg p-4 text-slate-500">
+                        <span className="text-sm uppercase font-semibold mr-3 tracking-wider">Roommate {selectedRoommates.length + i + 1}</span>
+                        <span className="italic">Waiting for selection...</span>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="flex gap-3">
+                    {isEditMode && (
+                      <button 
+                        onClick={() => setIsEditMode(false)}
+                        className="flex-1 bg-slate-800 hover:bg-slate-700 text-white py-3 rounded-lg font-medium transition-colors border border-slate-700 shadow-lg"
+                      >
+                        Cancel
+                      </button>
+                    )}
                     <button 
-                      onClick={() => removeRoommate(r['Reg. No.'])}
-                      className="text-red-400 hover:text-red-300 p-1 bg-red-400/10 rounded-md transition-colors"
+                      onClick={handleSubmitGroup}
+                      disabled={selectedRoommates.length !== 2}
+                      className="flex-[2] bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 disabled:text-slate-500 text-white py-3 rounded-lg font-medium transition-colors border border-emerald-500 shadow-lg flex justify-center items-center gap-2"
                     >
-                      <X size={18} />
+                      {isEditMode ? 'Update Choices in Database' : 'Submit Choices to Database'} <ArrowRight size={18} />
                     </button>
                   </div>
-                ))}
-                {[...Array(2 - selectedRoommates.length)].map((_, i) => (
-                  <div key={`empty-${i}`} className="flex items-center bg-slate-950/50 border border-dashed border-slate-700 rounded-lg p-4 text-slate-500">
-                    <span className="text-sm uppercase font-semibold mr-3 tracking-wider">Roommate {selectedRoommates.length + i + 1}</span>
-                    <span className="italic">Waiting for selection...</span>
-                  </div>
-                ))}
-              </div>
-
-              <button 
-                onClick={handleSubmitGroup}
-                disabled={selectedRoommates.length !== 2}
-                className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 disabled:text-slate-500 text-white py-3 rounded-lg font-medium transition-colors border border-emerald-500 shadow-lg flex justify-center items-center gap-2"
-              >
-                Submit Group to Database <ArrowRight size={18} />
-              </button>
+                </>
+              )}
             </div>
           </div>
         )}
@@ -309,116 +402,29 @@ export default function App() {
             <div className="flex items-center justify-between">
               <h2 className="text-xl font-semibold text-white flex items-center gap-2">
                 <LayoutDashboard size={20} className="text-slate-400" />
-                System Dashboard
+                Live Dashboard
               </h2>
-              <div className="flex gap-2 bg-slate-900 p-1 rounded-lg border border-slate-800">
-                <button 
-                  onClick={() => setActiveTab('database')}
-                  className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center gap-2 ${activeTab === 'database' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-slate-200'}`}
-                >
-                  <List size={16} />
-                  Database ({pool.length})
-                </button>
-                <button 
-                  onClick={() => setActiveTab('results')}
-                  className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center gap-2 ${activeTab === 'results' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-slate-200'}`}
-                >
-                  <Users size={16} />
-                  Results
-                </button>
-              </div>
             </div>
-
-            {activeTab === 'database' && (
-              <div className="bg-slate-900 rounded-xl border border-slate-800 shadow-xl overflow-hidden flex flex-col h-[600px]">
-                <div className="flex justify-between items-center p-4 border-b border-slate-800">
-                  <h3 className="text-slate-300 font-medium">Current Matchmaking Pool</h3>
-                  <button 
-                    onClick={clearDatabase}
-                    className="text-red-400 hover:text-red-300 text-sm flex items-center gap-1 transition-colors"
-                  >
-                    <Trash2 size={14} /> Clear All
-                  </button>
-                </div>
-                <div className="overflow-y-auto flex-1 custom-scrollbar">
-                  <table className="w-full text-left text-sm text-slate-300">
-                    <thead className="bg-slate-800/50 text-slate-400 sticky top-0 backdrop-blur-sm">
-                      <tr>
-                        <th className="px-6 py-3 font-medium">Student</th>
-                        <th className="px-6 py-3 font-medium">Reg. No.</th>
-                        <th className="px-6 py-3 font-medium">Branch</th>
-                        <th className="px-6 py-3 font-medium">Desired Roommates</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-800/50">
-                      {pool.map((s, i) => (
-                        <tr key={i} className="hover:bg-slate-800/30 transition-colors">
-                          <td className="px-6 py-4 text-white font-medium">{s.Name}</td>
-                          <td className="px-6 py-4 font-mono text-blue-300">{s['Reg. No.']}</td>
-                          <td className="px-6 py-4">
-                            <span className="bg-slate-800 border border-slate-700 px-2.5 py-1 rounded-md text-xs text-slate-300 font-medium">
-                              {s.Program}
-                            </span>
-                          </td>
-                          <td className="px-6 py-4 font-mono text-slate-400">
-                            {s.desired.join(', ')}
-                          </td>
-                        </tr>
-                      ))}
-                      {pool.length === 0 && (
-                        <tr>
-                          <td colSpan={4} className="px-6 py-12 text-center text-slate-500">
-                            <Database size={32} className="mx-auto mb-3 opacity-20" />
-                            No students registered yet.
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-
-            {activeTab === 'results' && !result && (
-              <div className="h-[600px] flex flex-col items-center justify-center border-2 border-dashed border-slate-800 rounded-xl text-slate-500 bg-slate-900/50">
-                <Users size={48} className="mb-4 opacity-50" />
-                <p className="text-lg font-medium text-slate-400">No results generated yet.</p>
-                <p className="text-sm mt-2">Click "Run Engine" to process the database.</p>
-              </div>
-            )}
-
-            {activeTab === 'results' && result && (
-              <div className="space-y-6">
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <div className="bg-slate-900 border border-slate-800 rounded-lg p-5 shadow-lg">
-                    <div className="text-3xl font-bold text-emerald-400">{result.trueGroups.length}</div>
-                    <div className="text-sm text-slate-400 mt-1 font-medium">True Target Groups</div>
-                  </div>
-                  <div className="bg-slate-900 border border-slate-800 rounded-lg p-5 shadow-lg">
-                    <div className="text-3xl font-bold text-blue-400">{result.dummyGroups.length}</div>
-                    <div className="text-sm text-slate-400 mt-1 font-medium">Dummy Trios Formed</div>
-                  </div>
-                  <div className="bg-slate-900 border border-slate-800 rounded-lg p-5 shadow-lg">
-                    <div className="text-3xl font-bold text-purple-400">{result.metaClusters.length}</div>
-                    <div className="text-sm text-slate-400 mt-1 font-medium">Meta-Clusters (9-person pools)</div>
-                  </div>
-                </div>
-
-                <div className="space-y-6 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
-                  {result.tickets.length > 0 ? (
-                    result.tickets.map((ticket, idx) => (
-                      <TicketCard key={idx} ticket={ticket} />
-                    ))
-                  ) : (
-                    <div className="p-8 text-center text-slate-400 bg-slate-900 rounded-xl border border-slate-800">
-                      No mutual matches found in the current pool.
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
+            
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl relative overflow-hidden text-center">
+               <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-blue-500 to-purple-500"></div>
+               <div className="inline-flex items-center justify-center bg-blue-500/10 p-4 rounded-full border border-blue-500/20 mb-6 animate-pulse">
+                  <Database size={48} className="text-blue-400" />
+               </div>
+               <h3 className="text-4xl font-bold text-white mb-2">{totalRegistered * 3}</h3>
+               <p className="text-xl font-medium text-slate-300 mb-2">Total Students Registered in the System</p>
+               <p className="text-slate-500">({totalRegistered} independent groups formed)</p>
+               
+               <div className="mt-8 flex justify-center">
+                 <div className="bg-slate-950 border border-slate-800 rounded-lg py-3 px-6 inline-flex items-center gap-3">
+                   <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></div>
+                   <span className="text-slate-400 text-sm font-medium">Real-time database sync active</span>
+                 </div>
+               </div>
+            </div>
           </div>
         )}
+
       </div>
     </div>
   );
