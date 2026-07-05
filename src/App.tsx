@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { supabase } from './lib/supabase';
+import { STUDENT_DATABASE } from './data/students';
 
 // --- TYPES ---
 type Branch = 'Computer Science' | 'Electronics' | 'Mechanical' | 'Civil' | 'Chemical' | 'Biotech';
@@ -80,9 +81,30 @@ export default function App() {
         setIsLoading(false);
         return;
       }
+
+      // Extract Reg No from email
+      const parts = userEmail.split('@')[0].split('.');
+      const regNo = parts[parts.length - 1].toUpperCase();
+      
+      // Find in student database
+      const student = STUDENT_DATABASE.find(s => s['Reg. No.'] === regNo);
+      
+      if (!student) {
+        setAuthError('Student not found in the database for this email.');
+        await supabase.auth.signOut();
+        setIsLoading(false);
+        return;
+      }
+
+      if (student.Gender !== 'M') {
+        setAuthError('Registration is currently restricted to males only.');
+        await supabase.auth.signOut();
+        setIsLoading(false);
+        return;
+      }
       
       setAuthError('');
-      await loadUserData(currentSession.user.id, userEmail);
+      await loadUserData(currentSession.user.id, userEmail, student);
     } else {
       setCurrentUser(null);
       setView('auth');
@@ -115,7 +137,7 @@ export default function App() {
   };
 
   // --- DATABASE LOGIC (WITH LOCAL FALLBACK) ---
-  const loadUserData = async (userId: string, email: string) => {
+  const loadUserData = async (userId: string, email: string, student: any) => {
     try {
       // Attempt to load from Supabase
       const { data: profileData, error: profileError } = await supabase
@@ -127,7 +149,7 @@ export default function App() {
       if (profileError && profileError.code === '42P01') {
         // Table doesn't exist - use local state fallback
         setDbError(true);
-        handleLocalFallbackMode(userId, email);
+        handleLocalFallbackMode(userId, email, student);
         return;
       }
 
@@ -136,13 +158,13 @@ export default function App() {
         await loadFeedData(userId, profileData.branch, profileData.gender);
         setView('feed');
       } else {
-        // Needs onboarding
+                // Needs onboarding
         setCurrentUser({
           id: userId,
           email: email,
-          name: '',
-          branch: '',
-          gender: '',
+          name: student.Name,
+          branch: student.Program,
+          gender: student.Gender,
           bio: '',
           preferences: [],
           alreadyHasRoommate: false,
@@ -153,7 +175,7 @@ export default function App() {
       }
     } catch (err) {
       console.error(err);
-      handleLocalFallbackMode(userId, email);
+      handleLocalFallbackMode(userId, email, student);
     } finally {
       setIsLoading(false);
     }
@@ -182,7 +204,7 @@ export default function App() {
   };
 
   // Local fallback logic when Supabase tables aren't created yet
-  const handleLocalFallbackMode = (userId: string, email: string) => {
+  const handleLocalFallbackMode = (userId: string, email: string, student: any) => {
     setIsLoading(false);
     const existing = allUsers.find(u => u.id === userId);
     if (existing) {
@@ -192,9 +214,9 @@ export default function App() {
       setCurrentUser({
         id: userId,
         email: email,
-        name: '',
-        branch: '',
-        gender: '',
+        name: student.Name,
+        branch: student.Program,
+        gender: student.Gender,
         bio: '',
         preferences: [],
         alreadyHasRoommate: false,
@@ -368,46 +390,35 @@ export default function App() {
           <p className="text-slate-400 mb-8">Let's set up your roommate preferences.</p>
           
           <div className="space-y-6">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div>
                 <label className="block text-sm font-medium text-slate-400 mb-2">Full Name</label>
                 <input
                   type="text"
-                  value={onboardingData.name || ''}
-                  onChange={e => setOnboardingData({...onboardingData, name: e.target.value})}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-white focus:border-rose-500 outline-none"
-                  placeholder="Your Name"
+                  value={currentUser?.name || ''}
+                  disabled
+                  className="w-full bg-slate-950/50 border border-slate-800 rounded-xl px-4 py-3 text-slate-500 cursor-not-allowed"
                 />
               </div>
               
               <div>
                 <label className="block text-sm font-medium text-slate-400 mb-2">Branch</label>
-                <select
-                  value={onboardingData.branch || ''}
-                  onChange={e => setOnboardingData({...onboardingData, branch: e.target.value as Branch})}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-white focus:border-rose-500 outline-none appearance-none"
-                >
-                  <option value="" disabled>Select Branch</option>
-                  <option value="Computer Science">Computer Science</option>
-                  <option value="Electronics">Electronics</option>
-                  <option value="Mechanical">Mechanical</option>
-                  <option value="Civil">Civil</option>
-                  <option value="Chemical">Chemical</option>
-                  <option value="Biotech">Biotech</option>
-                </select>
+                <input
+                  type="text"
+                  value={currentUser?.branch || ''}
+                  disabled
+                  className="w-full bg-slate-950/50 border border-slate-800 rounded-xl px-4 py-3 text-slate-500 cursor-not-allowed"
+                />
               </div>
               
               <div>
                 <label className="block text-sm font-medium text-slate-400 mb-2">Gender</label>
-                <select
-                  value={onboardingData.gender || ''}
-                  onChange={e => setOnboardingData({...onboardingData, gender: e.target.value as Gender})}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-white focus:border-rose-500 outline-none appearance-none"
-                >
-                  <option value="" disabled>Select Gender</option>
-                  <option value="M">Male</option>
-                  <option value="F">Female</option>
-                </select>
+                <input
+                  type="text"
+                  value={currentUser?.gender === 'M' ? 'Male' : currentUser?.gender === 'F' ? 'Female' : currentUser?.gender || ''}
+                  disabled
+                  className="w-full bg-slate-950/50 border border-slate-800 rounded-xl px-4 py-3 text-slate-500 cursor-not-allowed"
+                />
               </div>
             </div>
 
@@ -473,7 +484,7 @@ export default function App() {
 
             <button
               onClick={handleOnboardingSubmit}
-              disabled={!onboardingData.name || !onboardingData.branch || !onboardingData.gender}
+              disabled={false}
               className="w-full bg-gradient-to-r from-rose-500 to-orange-500 hover:from-rose-400 hover:to-orange-400 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold py-4 rounded-xl shadow-lg transition-all mt-8 text-lg"
             >
               Complete Profile & Enter Feed
