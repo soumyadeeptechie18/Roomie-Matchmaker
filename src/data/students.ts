@@ -9,6 +9,9 @@ export interface BaseStudent {
     "Blood Group": string;
 }
 
+
+
+
 export const STUDENT_DATABASE: BaseStudent[] = [
     {
         "Program":"B.Tech-BT",
@@ -8161,7 +8164,7 @@ export const STUDENT_DATABASE: BaseStudent[] = [
         "Blood Group":"O+"
     },
     {
-        "Program":"B.Tech-ME",
+        "Program":"B.Tech-EC",
         "Reg. No.":"25U10510",
         "Roll No.":"25F80064",
         "Name":"RAJARSHI ROY",
