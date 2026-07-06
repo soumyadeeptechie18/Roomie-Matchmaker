@@ -181,12 +181,17 @@ export default function App() {
     }
   };
 
-  const loadFeedData = async (userId: string, branch: string, gender: string) => {
+    const loadFeedData = async (userId: string, branch: string, gender: string) => {
     try {
+      let branchQuery = [branch];
+      if (branch === 'B.Tech-CS' || branch === 'B.Tech-MC') {
+        branchQuery = ['B.Tech-CS', 'B.Tech-MC'];
+      }
+
       const { data: profiles, error: pError } = await supabase
         .from('profiles')
         .select('*')
-        .eq('branch', branch)
+        .in('branch', branchQuery)
         .eq('gender', gender)
         .neq('id', userId);
         
@@ -262,11 +267,17 @@ export default function App() {
   };
 
   // --- FEED LOGIC ---
-  const feedUsers = useMemo(() => {
+    const feedUsers = useMemo(() => {
     if (!currentUser) return [];
+    
+    let allowedBranches = [currentUser.branch];
+    if (currentUser.branch === 'B.Tech-CS' || currentUser.branch === 'B.Tech-MC') {
+      allowedBranches = ['B.Tech-CS', 'B.Tech-MC'];
+    }
+
     return allUsers.filter(u => 
       u.id !== currentUser.id && 
-      u.branch === currentUser.branch &&
+      allowedBranches.includes(u.branch) &&
       u.gender === currentUser.gender &&
       u.lookingFor > 0 // Only show people who are looking for someone
     );
